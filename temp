@@ -1,0 +1,47 @@
+import math
+import pandas as pd
+from langchain import hub
+from langchain_openai import ChatOpenAI
+from datasets import load_dataset
+
+rag_dataset = load_dataset("neural-bridge/rag-dataset-1200")
+
+prompt = hub.pull("rlm/rag-prompt")
+llm = ChatOpenAI(model="gpt-4o-mini", api_key=OPENAI_API_KEY).bind(logprobs=True)
+
+data = []
+num_repeats = 10
+num_qa = 5
+alpha = 0.1  # smoothing factor for EMA
+
+for i in range(num_qa):
+    context = rag_dataset['train'][i]['context']
+    question = rag_dataset['train'][i]['question']
+    example_messages = prompt.invoke({"context": context, "question": question}).to_messages()
+
+    for _ in range(num_repeats):
+        full = None
+        log_probs = []
+        ema_log_prob = None
+
+        for chunk in llm.stream(example_messages):
+            full = chunk if full is None else full + chunk
+            if "logprobs" in full.response_metadata:
+                for token in full.response_metadata["logprobs"]["content"]:
+                    log_prob = token["logprob"]
+                    log_probs.append(log_prob)
+                    # Compute EMA
+                    ema_log_prob = alpha * log_prob + (1 - alpha) * (ema_log_prob if ema_log_prob is not None else log_prob)
+
+        ppl = math.exp(-sum(log_probs) / len(log_probs)) if log_probs else None
+        ema_ppl = math.exp(-ema_log_prob) if ema_log_prob is not None else None
+        data.append({
+            "Context": context,
+            "Question": question,
+            "Answer": full.content if full else "No response",
+            "Perplexity": ppl,
+            "EMA_Perplexity": ema_ppl,
+            "Example": i + 1
+        })
+
+df = pd.DataFrame(data)
